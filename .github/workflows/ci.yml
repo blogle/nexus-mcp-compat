@@ -1,0 +1,109 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/blogle/nexus-mcp-compat
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check
+        run: nix flake check -L
+
+      - name: Build OCI image
+        run: nix build .#oci -L
+
+      - name: Check OCI archive size
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="$(readlink -f result)"
+          bytes="$(stat -c '%s' "$archive")"
+          mib="$(( (bytes + 1024 * 1024 - 1) / (1024 * 1024) ))"
+
+          echo "OCI archive size: ${mib} MiB"
+
+          if (( mib > 32 )); then
+            echo "OCI archive unexpectedly exceeds 32 MiB"
+            exit 1
+          fi
+
+      - name: Load OCI image
+        run: docker load < "$(readlink -f result)"
+
+      - name: Smoke test container startup
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run \
+            --detach \
+            --rm \
+            --name nexus-mcp-compat-smoke \
+            --publish 18000:8000 \
+            --env NEXUS_MCP_URL=http://127.0.0.1:9/mcp \
+            "$IMAGE:latest"
+
+          trap 'docker rm -f nexus-mcp-compat-smoke >/dev/null 2>&1 || true' EXIT
+
+          for i in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18000/healthz >/dev/null; then
+              exit 0
+            fi
+
+            sleep 0.25
+          done
+
+          docker logs nexus-mcp-compat-smoke
+          exit 1
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sha_tag="sha-${GITHUB_SHA:0:12}"
+
+          docker tag "$IMAGE:latest" "$IMAGE:$sha_tag"
+          docker push "$IMAGE:$sha_tag"
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            docker push "$IMAGE:latest"
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            docker tag "$IMAGE:latest" "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          fi
