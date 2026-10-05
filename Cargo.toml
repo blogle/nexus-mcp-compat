@@ -11,7 +11,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-rmcp = { version = "=3.0.1", default-features = false, features = [
+rmcp = { version = "=3.5.1", default-features = false, features = [
   "server",
   "client",
   "transport-streamable-http-server",
